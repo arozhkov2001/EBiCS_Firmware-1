@@ -100,11 +100,11 @@ uint8_t ui8_hall_state=0;
 uint8_t ui8_hall_state_old=0;
 uint8_t ui8_hall_case =0;
 uint16_t ui16_tim2_recent=0;
-uint16_t ui16_timertics=5000; 					//timertics between two hall events for 60° interpolation
-uint16_t ui16_reg_adc_value;
+uint16_t ui16_timertics=5000; 					//timertics between two hall events for 60Â° interpolation
+uint16_t ui16_throttle;
 uint16_t ui16_brake_adc;
-uint32_t ui32_reg_adc_value_filter;
-uint32_t ui32_brake_adc;
+uint32_t ui32_throttle_cumulated;
+uint32_t ui32_brake_adc_cumulated;
 uint16_t ui16_ph1_offset=0;
 uint16_t ui16_ph2_offset=0;
 uint16_t ui16_ph3_offset=0;
@@ -181,7 +181,7 @@ uint16_t switchtime[3];
 volatile uint16_t adcData[8]; //Buffer for ADC1 Input
 q31_t tic_array[6];
 
-//Rotor angle scaled from degree to q31 for arm_math. -180°-->-2^31, 0°-->0, +180°-->+2^31
+//Rotor angle scaled from degree to q31 for arm_math. -180Â°-->-2^31, 0Â°-->0, +180Â°-->+2^31
 const q31_t DEG_0 = 0;
 const q31_t DEG_plus60 = 715827883; //744755980
 const q31_t DEG_plus120= 1431655765; //1442085801
@@ -259,7 +259,7 @@ void bafang_update(void);
 static void dyn_adc_state(q31_t angle);
 static void set_inj_channel(char state);
 void get_standstill_position();
-q31_t speed_PLL (q31_t ist, q31_t soll);
+q31_t speed_PLL (q31_t ist, q31_t soll, uint8_t speedadapt);
 int32_t map (int32_t x, int32_t in_min, int32_t in_max, int32_t out_min, int32_t out_max);
 int32_t speed_to_tics (uint8_t speed);
 int8_t tics_to_speed (uint32_t tics);
@@ -490,7 +490,7 @@ int main(void)
 
    	while(adcData[1]>THROTTLE_OFFSET)
    	  	{
-   	  	//do nothing (For Safety switching on)
+   	  	//do nothing (For Safety at switching on)
    	  	}
 
 #if (DISPLAY_TYPE != DISPLAY_TYPE_DEBUG || !AUTODETECT)
@@ -507,7 +507,7 @@ int main(void)
  // set absolute position to corresponding hall pattern.
 
 #if (DISPLAY_TYPE == DISPLAY_TYPE_DEBUG)
-    printf_("Lishui FOC v0.9 \n ");
+    printf_("Lishui FOC v1.0 \n ");
     printf_("Motor specific angle:  %d, direction %d \n ", q31_rotorposition_motor_specific, i16_hall_order);
 #endif
 
@@ -548,6 +548,24 @@ int main(void)
 	  ui8_UART_flag=0;
 	  }
 
+
+	  //process regualr ADC
+	  if(ui8_adc_regular_flag){
+		ui32_throttle_cumulated -= ui32_throttle_cumulated>>4;
+	#ifdef TQONAD1
+		ui32_throttle_cumulated += adcData[6]; //get value from AD1 PB1
+	#else
+		ui32_throttle_cumulated += adcData[1]; //get value from SP
+	#endif
+		ui32_brake_adc_cumulated -= ui32_brake_adc_cumulated>>4;
+		ui32_brake_adc_cumulated+=adcData[5];//get value for analog brake from AD2 = PB0
+		ui16_brake_adc=ui32_brake_adc_cumulated>>4;
+		ui16_throttle = ui32_throttle_cumulated>>4;
+
+		ui8_adc_regular_flag=0;
+
+	  }
+
 	  //PAS signal processing
 	  if(ui8_PAS_flag){
 		  if(uint32_PAS_counter>100){ //debounce
@@ -564,7 +582,7 @@ int main(void)
 		  ui8_PAS_flag=0;
 		  //read in and sum up torque-signal within one crank revolution (for sempu sensor 32 PAS pulses/revolution, 2^5=32)
 		  uint32_torque_cumulated -= uint32_torque_cumulated>>5;
-		  if(ui16_reg_adc_value>THROTTLE_OFFSET)uint32_torque_cumulated += (ui16_reg_adc_value-THROTTLE_OFFSET);
+		  if(ui16_throttle>THROTTLE_OFFSET)uint32_torque_cumulated += (ui16_throttle-THROTTLE_OFFSET);
 		  }
 	  }
 #if (SPEEDSOURCE == INTERNAL) && (DISPLAY_TYPE == DISPLAY_TYPE_KUNTENG)
@@ -617,6 +635,9 @@ int main(void)
 
 			  //current target calculation
 			//highest priority: regen by brake lever
+
+		if(HAL_GPIO_ReadPin(Brake_GPIO_Port, Brake_Pin)) brake_flag=0;
+		else brake_flag=1;
 #ifdef ADC_BRAKE
 		uint16_mapped_BRAKE = map(ui16_brake_adc, THROTTLE_OFFSET , THROTTLE_MAX, 0, REGEN_CURRENT);
 if(uint16_mapped_BRAKE>0){
@@ -628,13 +649,13 @@ if(uint16_mapped_BRAKE>0){
 				}
 if(uint16_mapped_BRAKE==0) {brake_flag=0;}
 #else
-					if(!HAL_GPIO_ReadPin(Brake_GPIO_Port, Brake_Pin)){
-						brake_flag = 1;
-					if(tics_to_speed(uint32_tics_filtered>>3)>6)int32_current_target=-REGEN_CURRENT; //only apply regen, if motor is turning fast enough
-					if(tics_to_speed(uint32_tics_filtered>>3)>6)int32_current_target=-uint16_mapped_BRAKE;
-					else int32_current_target=0;
-									}
-					if(HAL_GPIO_ReadPin(Brake_GPIO_Port, Brake_Pin)) {brake_flag=0;}
+
+				if(brake_flag){
+
+						if(tics_to_speed(uint32_tics_filtered>>3)>6)int32_current_target=-REGEN_CURRENT; //only apply regen, if motor is turning fast enough
+						else int32_current_target=0;
+				}
+
 #endif
 				//next priority: undervoltage protection
 				else if(MS.Voltage<VOLTAGE_MIN)int32_current_target=0;
@@ -645,7 +666,7 @@ if(uint16_mapped_BRAKE==0) {brake_flag=0;}
 
 		#ifdef TS_MODE //torque-sensor mode
 					//calculate current target form torque, cadence and assist level
-					int32_temp_current_target = (TS_COEF*(int16_t)(MS.assist_level)* (uint32_torque_cumulated>>5)/uint32_PAS)>>8; //>>5 aus Mittelung �ber eine Kurbelumdrehung, >>8 aus KM5S-Protokoll Assistlevel 0..255
+					int32_temp_current_target = (TS_COEF*(int16_t)(MS.assist_level)* (uint32_torque_cumulated>>5)/uint32_PAS)>>8; //>>5 aus Mittelung über eine Kurbelumdrehung, >>8 aus KM5S-Protokoll Assistlevel 0..255
 
 					//limit currest target to max value
 					if(int32_temp_current_target>PH_CURRENT_MAX) int32_temp_current_target = PH_CURRENT_MAX;
@@ -702,7 +723,7 @@ if(uint16_mapped_BRAKE==0) {brake_flag=0;}
 #ifdef THROTTLE_OVERRIDE
 
 				  // read in throttle for throttle override
-				  uint16_mapped_throttle = map(ui16_reg_adc_value, THROTTLE_OFFSET , THROTTLE_MAX, 0, PH_CURRENT_MAX);
+				  uint16_mapped_throttle = map(ui16_throttle, THROTTLE_OFFSET , THROTTLE_MAX, 0, PH_CURRENT_MAX);
 				  //check for throttle override
 				  if(uint16_mapped_PAS>uint16_mapped_throttle)   {
 
@@ -766,7 +787,7 @@ if(uint16_mapped_BRAKE==0) {brake_flag=0;}
 //------------------------------------------------------------------------------------------------------------
 				//enable PWM if power is wanted
 	  if (int32_current_target>0&&!READ_BIT(TIM1->BDTR, TIM_BDTR_MOE)){
-		  speed_PLL(0,0);//reset integral part
+		  speed_PLL(0,0,0);//reset integral part
 		  uint16_half_rotation_counter=0;
 		  uint16_full_rotation_counter=0;
 		    TIM1->CCR1 = 1023; //set initial PWM values
@@ -784,7 +805,7 @@ if(uint16_mapped_BRAKE==0) {brake_flag=0;}
 	  //slow loop procedere @16Hz, for LEV standard every 4th loop run, send page,
 	  if(ui32_tim3_counter>500){
 
-		  MS.Temperature = adcData[6]*41>>8; //0.16 is calibration constant: Analog_in[10mV/°C]/ADC value. Depending on the sensor LM35)
+		  MS.Temperature = adcData[6]*41>>8; //0.16 is calibration constant: Analog_in[10mV/Â°C]/ADC value. Depending on the sensor LM35)
 		  MS.Voltage=adcData[0];
 		  if(uint32_SPEED_counter>127999){
 			  MS.Speed =128000;
@@ -818,7 +839,7 @@ if(uint16_mapped_BRAKE==0) {brake_flag=0;}
 		  //print values for debugging
 
 
-		 sprintf_(buffer, "%d, %d, %d, %d, %d, %d, %d, %d, %d\r\n", ui16_timertics, MS.i_q, int32_current_target,temp4, (uint16_t)adcData[1], MS.Battery_Current,internal_tics_to_speedx100(uint32_tics_filtered>>3),external_tics_to_speedx100(MS.Speed),uint32_SPEEDx100_cumulated>>SPEEDFILTER);
+		 sprintf_(buffer, "%d, %d, %d, %d, %d, %d, %d, %d, %d\r\n", ui16_timertics, MS.i_q, int32_current_target,((temp6 >> 23) * 180) >> 8, (uint16_t)adcData[1], MS.Battery_Current,uint32_tics_filtered>>3,tics_higher_limit,temp5);
 		 // sprintf_(buffer, "%d, %d, %d, %d, %d, %d\r\n",ui8_hall_state,(uint16_t)adcData[1],(uint16_t)adcData[2],(uint16_t)adcData[3],(uint16_t)(adcData[4]),(uint16_t)(adcData[5])) ;
 		 // sprintf_(buffer, "%d, %d, %d, %d, %d, %d\r\n",tic_array[0],tic_array[1],tic_array[2],tic_array[3],tic_array[4],tic_array[5]) ;
 		  i=0;
@@ -944,7 +965,7 @@ static void MX_ADC1_Init(void)
     /**Common config 
     */
   hadc1.Instance = ADC1;
-  hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE; //Scan muß für getriggerte Wandlung gesetzt sein
+  hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE; //Scan muÃ fÃ¼r getriggerte Wandlung gesetzt sein
   hadc1.Init.ContinuousConvMode = DISABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T3_TRGO;// Trigger regular ADC with timer 3 ADC_EXTERNALTRIGCONV_T1_CC1;// // ADC_SOFTWARE_START; //
@@ -973,10 +994,10 @@ static void MX_ADC1_Init(void)
   sConfigInjected.InjectedNbrOfConversion = 1;
   sConfigInjected.InjectedSamplingTime = ADC_SAMPLETIME_1CYCLE_5;
   sConfigInjected.ExternalTrigInjecConv = ADC_EXTERNALTRIGINJECCONV_T1_CC4; // Hier bin ich nicht sicher ob Trigger out oder direkt CC4
-  sConfigInjected.AutoInjectedConv = DISABLE; //muß aus sein
+  sConfigInjected.AutoInjectedConv = DISABLE; //muÃ aus sein
   sConfigInjected.InjectedDiscontinuousConvMode = DISABLE;
   sConfigInjected.InjectedOffset = ui16_ph1_offset;//1900;
-  HAL_ADC_Stop(&hadc1); //ADC muß gestoppt sein, damit Triggerquelle gesetzt werden kann.
+  HAL_ADC_Stop(&hadc1); //ADC muÃ gestoppt sein, damit Triggerquelle gesetzt werden kann.
   if (HAL_ADCEx_InjectedConfigChannel(&hadc1, &sConfigInjected) != HAL_OK)
   {
     _Error_Handler(__FILE__, __LINE__);
@@ -1385,19 +1406,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 // regular ADC callback
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
-	ui32_reg_adc_value_filter -= ui32_reg_adc_value_filter>>4;
-#ifdef TQONAD1
-	ui32_reg_adc_value_filter += adcData[6]; //get value from AD1
-#else
-	ui32_reg_adc_value_filter += adcData[1]; //get value from SP
-#endif
-	ui32_brake_adc -= ui32_brake_adc>>4;
-	ui32_brake_adc+=adcData[5];//get value from analog brake
-	ui16_brake_adc=ui32_brake_adc>>4;
-	ui16_reg_adc_value = ui32_reg_adc_value_filter>>4;
-
 	ui8_adc_regular_flag=1;
-
 }
 
 //injected ADC
@@ -1493,7 +1502,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc)
 			q31_rotorposition_absolute=q31_rotorposition_PLL;
 #else
 			//estimation by extrapolating directly from the hallsensor information
-			q31_rotorposition_absolute = q31_rotorposition_hall + (q31_t)(i16_hall_order * i8_recent_rotor_direction * ((10923 * ui16_tim2_recent)/ui16_timertics)<<16); //interpolate angle between two hallevents by scaling timer2 tics, 10923<<16 is 715827883 = 60�
+			q31_rotorposition_absolute = q31_rotorposition_hall + (q31_t)(i16_hall_order * i8_recent_rotor_direction * ((10923 * ui16_tim2_recent)/ui16_timertics)<<16); //interpolate angle between two hallevents by scaling timer2 tics, 10923<<16 is 715827883 = 60°
 #endif
 	   }
 		   else { //run in 6 step mode
@@ -1642,7 +1651,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 		} // end case
 
 #ifdef SPEED_PLL
-		q31_angle_per_tic = speed_PLL(q31_rotorposition_PLL,q31_rotorposition_hall);
+		q31_angle_per_tic = speed_PLL(q31_rotorposition_PLL,q31_rotorposition_hall, 4*tics_higher_limit/(uint32_tics_filtered>>3));
 
 #endif
 
@@ -1840,19 +1849,19 @@ int32_t map (int32_t x, int32_t in_min, int32_t in_max, int32_t out_min, int32_t
 //assuming, a proper AD conversion takes 350 timer tics, to be confirmed. DT+TR+TS deadtime + noise subsiding + sample time
 void dyn_adc_state(q31_t angle){
 	if (switchtime[2]>switchtime[0] && switchtime[2]>switchtime[1]){
-		MS.char_dyn_adc_state = 1; // -90° .. +30°: Phase C at high dutycycles
+		MS.char_dyn_adc_state = 1; // -90Â° .. +30Â°: Phase C at high dutycycles
 		if(switchtime[2]>1500)TIM1->CCR4 =  switchtime[2]-TRIGGER_OFFSET_ADC;
 		else TIM1->CCR4 = TRIGGER_DEFAULT;
 	}
 
 	if (switchtime[0]>switchtime[1] && switchtime[0]>switchtime[2]) {
-		MS.char_dyn_adc_state = 2; // +30° .. 150° Phase A at high dutycycles
+		MS.char_dyn_adc_state = 2; // +30Â° .. 150Â° Phase A at high dutycycles
 		if(switchtime[0]>1500)TIM1->CCR4 =  switchtime[0]-TRIGGER_OFFSET_ADC;
 		else TIM1->CCR4 = TRIGGER_DEFAULT;
 	}
 
 	if (switchtime[1]>switchtime[0] && switchtime[1]>switchtime[2]){
-		MS.char_dyn_adc_state = 3; // +150 .. -90° Phase B at high dutycycles
+		MS.char_dyn_adc_state = 3; // +150 .. -90Â° Phase B at high dutycycles
 		if(switchtime[1]>1500)TIM1->CCR4 =  switchtime[1]-TRIGGER_OFFSET_ADC;
 		else TIM1->CCR4 = TRIGGER_DEFAULT;
 	}
@@ -1898,7 +1907,7 @@ static void set_inj_channel(char state){
 
 
 }
-throttle_is_set(void){
+uint8_t throttle_is_set(void){
 	if(uint16_mapped_throttle > 0)
 	{
 		return 1;
@@ -1913,7 +1922,7 @@ void autodetect(){
    	q31_t diffangle=0;
    	HAL_Delay(5);
    	for(i=0;i<1080;i++){
-   		q31_rotorposition_absolute+=11930465; //drive motor in open loop with steps of 1�
+   		q31_rotorposition_absolute+=11930465; //drive motor in open loop with steps of 1°
    		HAL_Delay(5);
    		if (q31_rotorposition_absolute>-60&&q31_rotorposition_absolute<60){
    			switch (ui8_hall_case) //12 cases for each transition from one stage to the next. 6x forward, 6x reverse
@@ -2130,15 +2139,15 @@ void runPIcontrol(){
 		  	PI_flag=0;
 	  }
 
-q31_t speed_PLL (q31_t ist, q31_t soll)
+q31_t speed_PLL (q31_t ist, q31_t soll, uint8_t speedadapt)
   {
     q31_t q31_p;
     static q31_t q31_d_i = 0;
     static q31_t q31_d_dc = 0;
     temp6 = soll-ist;
-
-    q31_p=(soll - ist)>>P_FACTOR_PLL;   				//7 for Shengyi middrive, 10 for BionX IGH3
-    q31_d_i+=(soll - ist)>>I_FACTOR_PLL;				//11 for Shengyi middrive, 10 for BionX IGH3
+    temp5 = speedadapt;
+    q31_p=(soll - ist)>>(P_FACTOR_PLL-speedadapt);   				//7 for Shengyi middrive, 10 for BionX IGH3
+    q31_d_i+=(soll - ist)>>(I_FACTOR_PLL-speedadapt);				//11 for Shengyi middrive, 10 for BionX IGH3
 
     //clamp i part to twice the theoretical value from hall interrupts
         if(q31_d_i>((DEG_plus60>>19)*500/ui16_timertics)<<16)q31_d_i=((DEG_plus60>>19)*500/ui16_timertics)<<16;
