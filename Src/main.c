@@ -465,7 +465,8 @@ int main(void)
 
 
    	ui8_adc_offset_done_flag=1;
-#if defined (ADC_BRAKE) && (AUTODETECT == 1)
+
+#if defined (ADC_BRAKE)
 
   	while ((adcData[5]>THROTTLE_OFFSET)&&(adcData[1]>(THROTTLE_MAX-THROTTLE_OFFSET))){HAL_Delay(200);
    	   	   			y++;
@@ -473,13 +474,14 @@ int main(void)
    	   	   			}
 
 #endif
-#if !defined (ADC_BRAKE) && (AUTODETECT == 1)
 
-  	while ((!HAL_GPIO_ReadPin(Brake_GPIO_Port, Brake_Pin))&&(adcData[1]>(THROTTLE_MAX-THROTTLE_OFFSET))){HAL_Delay(200);
+//run autodect, whenn brake is pulled an throttle is pulled for 10 at startup
+  	while ((!HAL_GPIO_ReadPin(Brake_GPIO_Port, Brake_Pin))&&(adcData[1]>(THROTTLE_OFFSET+20))){
+  				HAL_Delay(200);
   	   			y++;
   	   			if(y==35) autodetect();
   	   			}
-#endif
+
 #if (DISPLAY_TYPE == DISPLAY_TYPE_DEBUG)
    	printf_("phase current offsets:  %d, %d, %d \n ", ui16_ph1_offset, ui16_ph2_offset, ui16_ph3_offset);
 #if (AUTODETECT == 1)
@@ -636,20 +638,26 @@ int main(void)
 			  //current target calculation
 			//highest priority: regen by brake lever
 
-		if(HAL_GPIO_ReadPin(Brake_GPIO_Port, Brake_Pin)) brake_flag=0;
-		else brake_flag=1;
+
 #ifdef ADC_BRAKE
 		uint16_mapped_BRAKE = map(ui16_brake_adc, THROTTLE_OFFSET , THROTTLE_MAX, 0, REGEN_CURRENT);
-if(uint16_mapped_BRAKE>0){
-				brake_flag = 1;
+
+
+		if(uint16_mapped_BRAKE>0) brake_flag=0;
+		else brake_flag=1;
+
+
+		if(brake_flag){
+
 				//if(!HAL_GPIO_ReadPin(Brake_GPIO_Port, Brake_Pin)){
 					//if(tics_to_speed(uint32_tics_filtered>>3)>6)int32_current_target=-REGEN_CURRENT; //only apply regen, if motor is turning fast enough
 				if(tics_to_speed(uint32_tics_filtered>>3)>6)int32_current_target=-uint16_mapped_BRAKE;
 				else int32_current_target=0;
 				}
-if(uint16_mapped_BRAKE==0) {brake_flag=0;}
-#else
 
+#else
+		if(HAL_GPIO_ReadPin(Brake_GPIO_Port, Brake_Pin)) brake_flag=0;
+		else brake_flag=1;
 				if(brake_flag){
 
 						if(tics_to_speed(uint32_tics_filtered>>3)>6)int32_current_target=-REGEN_CURRENT; //only apply regen, if motor is turning fast enough
@@ -839,7 +847,7 @@ if(uint16_mapped_BRAKE==0) {brake_flag=0;}
 		  //print values for debugging
 
 
-		 sprintf_(buffer, "%d, %d, %d, %d, %d, %d, %d, %d, %d\r\n", ui16_timertics, MS.i_q, int32_current_target,((temp6 >> 23) * 180) >> 8, (uint16_t)adcData[1], MS.Battery_Current,uint32_tics_filtered>>3,tics_higher_limit,temp5);
+		 sprintf_(buffer, "%d, %d, %d, %d, %d, %d, %d, %d, %d\r\n", ui16_timertics, MS.i_q, int32_current_target,((temp6 >> 23) * 180) >> 8, (uint16_t)adcData[1], MS.Battery_Current,uint32_tics_filtered>>3,internal_tics_to_speedx100(uint32_tics_filtered>>3),temp5);
 		 // sprintf_(buffer, "%d, %d, %d, %d, %d, %d\r\n",ui8_hall_state,(uint16_t)adcData[1],(uint16_t)adcData[2],(uint16_t)adcData[3],(uint16_t)(adcData[4]),(uint16_t)(adcData[5])) ;
 		 // sprintf_(buffer, "%d, %d, %d, %d, %d, %d\r\n",tic_array[0],tic_array[1],tic_array[2],tic_array[3],tic_array[4],tic_array[5]) ;
 		  i=0;
@@ -1651,7 +1659,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 		} // end case
 
 #ifdef SPEED_PLL
-		q31_angle_per_tic = speed_PLL(q31_rotorposition_PLL,q31_rotorposition_hall, 4*tics_higher_limit/(uint32_tics_filtered>>3));
+		q31_angle_per_tic = speed_PLL(q31_rotorposition_PLL,q31_rotorposition_hall, SPDSHFT*tics_higher_limit/(uint32_tics_filtered>>3));
 
 #endif
 
